@@ -182,7 +182,7 @@ public:
 		NS_LOG_UNCOND (ss.str().c_str());
 
 		ss.str(""); ss.clear();
-		ss<< "Node: " << m_nodeId << "\n" << "BEFORE: ";
+		ss<< "Time: " << Simulator::Now().GetMilliSeconds() << " Node: " << m_nodeId << "\n" << "BEFORE: ";
 		AddVectorToStream(ss,m_lastTimestampSynched);
 		NS_LOG_UNCOND(ss.str().c_str());
 
@@ -286,7 +286,7 @@ int main (int argc, char *argv[])
                       StringValue (phyMode));
 
   NodeContainer c;
-  c.Create (3);
+  c.Create (NR_NODES);
 
   // The below set of helpers will help us to put together the wifi NICs we want
   WifiHelper wifi;
@@ -324,12 +324,24 @@ int main (int argc, char *argv[])
   // Note that with FixedRssLossModel, the positions below are not 
   // used for received signal strength. 
   MobilityHelper mobility;
-  Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator> ();
-  positionAlloc->Add (Vector (0.0, 0.0, 0.0));
-  positionAlloc->Add (Vector (5.0, 0.0, 0.0));
-  positionAlloc->Add (Vector (10.0, 0.0, 0.0));
 
-  mobility.SetPositionAllocator (positionAlloc);
+  mobility.SetPositionAllocator ("ns3::GridPositionAllocator",
+                                 "MinX", DoubleValue (0.0),
+                                 "MinY", DoubleValue (0.0),
+                                 "DeltaX", DoubleValue (100),
+                                 "DeltaY", DoubleValue (100),
+                                 "GridWidth", UintegerValue (3),
+                                 "LayoutType", StringValue ("RowFirst"));
+
+//  mobility.SetMobilityModel ("ns3::RandomWalk2dMobilityModel",
+//                             "Bounds", RectangleValue (Rectangle (0, 1000, 0, 1000)));
+
+//  Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator> ();
+//  positionAlloc->Add (Vector (70, 50, 0.0));
+//  positionAlloc->Add (Vector (50, 50, 0.0));
+//  positionAlloc->Add (Vector (400, 10, 0.0));
+//
+//  mobility.SetPositionAllocator (positionAlloc);
   mobility.SetMobilityModel ("ns3::ConstantPositionMobilityModel");
   mobility.Install (c);
 
@@ -353,15 +365,17 @@ int main (int argc, char *argv[])
   recvSink2->SetRecvCallback (MakeCallback (&ReceivePacket));
 */
 
-  Ptr<WifiAppAdhoc> app = CreateObject<WifiAppAdhoc>(c.Get(2),2,NR_NODES);
-  c.Get(2)->AddApplication(app);
-  app->SetStartTime(MilliSeconds(0));
-  //app->SetStopTime(Time(10000.0));
-
-  Ptr<WifiAppAdhoc> app2 = CreateObject<WifiAppAdhoc>(c.Get(1),1,NR_NODES);
-  c.Get(1)->AddApplication(app2);
-  app2->SetStartTime(MilliSeconds(1));
-  //app2->SetStopTime(Time(10000.0));
+  for (int i; i<NR_NODES; ++i) {
+	  Ptr<WifiAppAdhoc> app = CreateObject<WifiAppAdhoc>(c.Get(i),i,NR_NODES);
+	  c.Get(i)->AddApplication(app);
+	  app->SetStartTime(MilliSeconds(10* i));
+  }
+	  //app->SetStopTime(Time(10000.0));
+//
+//  Ptr<WifiAppAdhoc> app2 = CreateObject<WifiAppAdhoc>(c.Get(1),1,NR_NODES);
+//  c.Get(1)->AddApplication(app2);
+//  app2->SetStartTime(MilliSeconds(1));
+//  //app2->SetStopTime(Time(10000.0));
 
   // Tracing
   wifiPhy.EnablePcap ("wifi-simple-adhoc", devices);
@@ -369,7 +383,7 @@ int main (int argc, char *argv[])
   // Output what we are doing
   NS_LOG_UNCOND ("Testing " << numPackets  << " packets sent with receiver rss " << rss );
 
-  Simulator::Stop(Seconds(10));
+  Simulator::Stop(Seconds(600));
   Simulator::Run ();
   Simulator::Destroy ();
 
