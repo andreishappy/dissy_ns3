@@ -65,8 +65,7 @@
 #include <string>
 #include <sstream>
 #include <fstream>
-
-
+#include <algorithm>
 
 
 
@@ -74,19 +73,35 @@ NS_LOG_COMPONENT_DEFINE ("WifiSimpleAdhoc");
 
 using namespace ns3;
 
-std::map<uint64_t,int64_t> sentTimestampMap;
+
+std::map<uint64_t,std::vector<int64_t> > sentTimestampMap;
 std::map<uint64_t,int> sourceMap;
 
 std::ofstream fileLog;
-Time DEFAULT_SEND_P = MilliSeconds(50);
-int NR_NODES = 20;
+Time DEFAULT_SEND_P = MilliSeconds(3000);
+int NR_NODES = 20; //global used by all nodes
+Time DATA_GENERATION_RATE = Seconds(1); //seconds
+
+void AddVectorToStream(std::ostringstream &ss, std::vector<int64_t> toAdd) {
+	ss << "[";
+	for (int i = 0; i< NR_NODES;++i) {
+				ss << toAdd[i];
+				if (i < NR_NODES -1) {
+					ss << ", ";
+				}
+			}
+	ss << "]";
+}
+
+
+
 
 class WifiAppAdhoc : public Application {
 private:
 	Ptr<Socket> m_recvSocket;
 	Ptr<Socket> m_sendSocket;
 	Ptr<Node> m_node;
-	EventId m_nextSend;
+	EventId m_nextSend, m_nextTimestamp;
 	std::vector<int64_t> m_lastTimestampSynched;
 	int m_nodeId;
 
@@ -113,11 +128,16 @@ public:
 		m_sendSocket->Connect(remote);
 
 		//Schedule first send
-		m_nextSend = Simulator::Schedule (Simulator::Now() + DEFAULT_SEND_P, &WifiAppAdhoc::GenerateTraffic,this);
-
+		m_nextSend = Simulator::Schedule (DEFAULT_SEND_P, &WifiAppAdhoc::GenerateTraffic,this);
+        m_nextTimestamp = Simulator::Schedule(DATA_GENERATION_RATE,&WifiAppAdhoc::UpdateLocalTimestamp,this);
 		std::ostringstream ss;
 		ss << "Started @" << Simulator::Now().GetMilliSeconds();
 		NS_LOG_UNCOND(ss.str().c_str());
+	}
+
+	void UpdateLocalTimestamp() {
+		m_lastTimestampSynched[m_nodeId] = Simulator::Now().GetMilliSeconds();
+		m_nextTimestamp = Simulator::Schedule(DATA_GENERATION_RATE,&WifiAppAdhoc::UpdateLocalTimestamp,this);
 	}
 
 	void GenerateTraffic ()
@@ -128,47 +148,59 @@ public:
 		  Ptr<Packet> packet = Create<Packet>(1000);
 		  uint64_t packetUID = packet->GetUid();
 
-		  NS_LOG_UNCOND ("Entered Generate Traffic");
-		  std::pair<uint64_t,int64_t> entry(packetUID,Simulator::Now().GetMilliSeconds());
+		  std::pair<uint64_t,std::vector<int64_t> > entry(packetUID,m_lastTimestampSynched);
 		  sentTimestampMap.insert(entry);
 		  std::pair<uint64_t,int> sourceEntry(packetUID,m_nodeId);
 		  sourceMap.insert(sourceEntry);
 
-		  NS_LOG_UNCOND ("Entered Generate Traffic");
-
 		  if (m_sendSocket) {
 	      m_sendSocket->Send(packet);
 	      std::ostringstream ss;
-	      ss << "Node : " << m_nodeId << " packet sent UID: " << packet->GetUid() << " @" << (Simulator::Now().GetMilliSeconds());
+	      ss << "Node : " << m_nodeId << " packet sent UID: " << packet->GetUid() << " @" << (Simulator::Now().GetMilliSeconds()) << "\n";
+	      AddVectorToStream(ss,m_lastTimestampSynched);
 	      NS_LOG_UNCOND (ss.str().c_str());
 		  }
 
-	      NS_LOG_UNCOND (" Exited Generate Traffic");
 
+	      m_nextSend = Simulator::Schedule (DEFAULT_SEND_P, &WifiAppAdhoc::GenerateTraffic,this);
 	      //NS_LOG_UNCOND (Simulator::GetDelayLeft(m_nextSend).GetMilliSeconds());
 	}
 	
 
 	void ReceivePacket(Ptr<Socket> socket) {
-		NS_LOG_UNCOND ("Entered ReceivePacket");
 		Ptr<Packet> packet = socket->Recv();
 		uint64_t packetUid = packet->GetUid();
 
-		int64_t timestamp = sentTimestampMap.find(packetUid)->second;
+		std::vector<int64_t> timestampVectorReceived = sentTimestampMap.find(packetUid)->second;
 		int sourceId = sourceMap.find(packetUid)->second;
 
 
 		std::ostringstream ss;
-		ss << "Node: " << m_nodeId << " OO Received Packet From: " << sourceId << " Timestamp: " << timestamp;
+		ss << "Node: " << m_nodeId << " OO Received Packet From: " << sourceId << "Vector: ";
+		AddVectorToStream(ss,timestampVectorReceived);
+
 		NS_LOG_UNCOND (ss.str().c_str());
 
-		if (m_lastTimestampSynched[sourceId] < timestamp) {
-			m_lastTimestampSynched[sourceId] = timestamp;
-			ss.str("");
-			ss.clear();
-			ss << "Node: " << m_nodeId << " New synch: " << timestamp;
-			NS_LOG_UNCOND(ss.str().c_str());
+		ss.str(""); ss.clear();
+		ss<< "Node: " << m_nodeId << "\n" << "BEFORE: ";
+		AddVectorToStream(ss,m_lastTimestampSynched);
+		NS_LOG_UNCOND(ss.str().c_str());
+
+		for (int i = 0; i < NR_NODES; ++i) {
+		if (m_lastTimestampSynched[i] < timestampVectorReceived[i]) {
+			m_lastTimestampSynched[i] = timestampVectorReceived[i];
+//			ss.str("");
+//			ss.clear();
+//			ss << "Node: " << m_nodeId << " New synch: " << timestampVectorReceived[i];
+//			NS_LOG_UNCOND(ss.str().c_str());
 		}
+		}
+
+		ss.str("");
+		ss.clear();
+		ss << "AFTER:  ";
+		AddVectorToStream(ss,m_lastTimestampSynched);
+		NS_LOG_UNCOND(ss.str().c_str());
 
 		fileLog << Simulator::Now().GetMilliSeconds() << ", " << packetUid << "\n";
 	}
@@ -178,21 +210,21 @@ public:
 
 
 
-void ReceivePacket (Ptr<Socket> socket)
-{
-	Ptr<Packet> packet = socket->Recv();
-	uint64_t packetUid = packet->GetUid();
-
-	int64_t timestamp = sentTimestampMap.find(packetUid)->second;
-
-
-
-	std::ostringstream ss;
-	ss << "Received Packet UID:" << packetUid << " Timestamp: " << timestamp;
-	NS_LOG_UNCOND (ss.str().c_str());
-
-	fileLog << Simulator::Now().GetMilliSeconds() << ", " << packetUid << "\n";
-}
+//void ReceivePacket (Ptr<Socket> socket)
+//{
+//	Ptr<Packet> packet = socket->Recv();
+//	uint64_t packetUid = packet->GetUid();
+//
+//	int64_t timestamp = sentTimestampMap.find(packetUid)->second;
+//
+//
+//
+//	std::ostringstream ss;
+//	ss << "Received Packet UID:" << packetUid << " Timestamp: " << timestamp;
+//	NS_LOG_UNCOND (ss.str().c_str());
+//
+//	fileLog << Simulator::Now().GetMilliSeconds() << ", " << packetUid << "\n";
+//}
 
 /*
 static void GenerateTraffic (Ptr<Socket> socket, uint32_t pktSize, 
@@ -337,6 +369,7 @@ int main (int argc, char *argv[])
   // Output what we are doing
   NS_LOG_UNCOND ("Testing " << numPackets  << " packets sent with receiver rss " << rss );
 
+  Simulator::Stop(Seconds(10));
   Simulator::Run ();
   Simulator::Destroy ();
 
