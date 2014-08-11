@@ -67,33 +67,62 @@
 #include <fstream>
 #include <algorithm>
 
-
+//Message Type definitions
+#define DATA 1
+#define RREQ 2
+#define RACK 3
 
 NS_LOG_COMPONENT_DEFINE ("WifiSimpleAdhoc");
 
 using namespace ns3;
 
-
+//used to distinguish between control plane and data plane
+std::map<uint64_t,int> messageTypeMap;
+//DATA PLANE
 std::map<uint64_t,std::vector<int64_t> > sentTimestampMap;
 std::map<uint64_t,int> sourceMap;
+//CONTROL PLANCE
+//   RREQ
+std::map<uint64_t,std::vector<int> > pathMap;
+std::map<uint64_t,int > destinationMap;
+//   RACK
+std::map<uint64_t,std::vector<int> > partialPathMap;
+std::map<uint64_t,std::vector<int> > completePathMap;
 
 std::ofstream fileLog;
+std::ofstream debugLog;
 Time DEFAULT_SEND_P = MilliSeconds(3000);
 int NR_NODES = 20; //global used by all nodes
 Time DATA_GENERATION_RATE = Seconds(1); //seconds
+Time BACKOFF_PERIOD = MilliSeconds(20);
+Time FAST = MilliSeconds(300);
+int PATH_DISCOVERY_BACKOFF = 20;
 
-void AddVectorToStream(std::ostringstream &ss, std::vector<int64_t> toAdd) {
+
+template<typename T>
+void AddVectorToStream(std::ostream &ss, T toAdd) {
 	ss << "[";
-	for (int i = 0; i< NR_NODES;++i) {
-				ss << toAdd[i];
-				if (i < NR_NODES -1) {
+	for (typename T::iterator it = toAdd.begin(); it != toAdd.end(); ++it) {
+				ss << *it;
+				if (it + 1 < toAdd.end()) {
 					ss << ", ";
 				}
 			}
 	ss << "]";
 }
 
-
+bool NoLoopsInPath(std::vector<int> path) {
+//	std::ostringstream ss;
+//	ss << "Checking for loops ";
+//	AddVectorToStream(ss,path);
+//	NS_LOG_UNCOND(ss.str().c_str());
+	std::map<int,bool> seen;
+	for (std::vector<int>::iterator it = path.begin(); it != path.end(); ++it) {
+		if (seen.find(*it) != seen.end() ) return false;
+		else seen.insert(std::pair<int,bool> (*it,true));
+	}
+	return true;
+}
 
 
 class WifiAppAdhoc : public Application {
@@ -110,6 +139,13 @@ public:
 		m_node = n;
 		m_nodeId = nodeId;
 		m_lastTimestampSynched = std::vector<int64_t>(nrNodes,0);
+
+		Ptr<MobilityModel> mobility = m_node->GetObject<MobilityModel>();
+		Vector pos = mobility->GetPosition();
+		std::ostringstream ss;
+		ss << "Node: "<< m_nodeId<< " x=" << pos.x << " y=" << pos.y;
+		NS_LOG_UNCOND(ss.str().c_str());
+
 	}
 
 	virtual void StartApplication(void) {
@@ -128,11 +164,33 @@ public:
 		m_sendSocket->Connect(remote);
 
 		//Schedule first send
-		m_nextSend = Simulator::Schedule (DEFAULT_SEND_P, &WifiAppAdhoc::GenerateTraffic,this);
-        m_nextTimestamp = Simulator::Schedule(DATA_GENERATION_RATE,&WifiAppAdhoc::UpdateLocalTimestamp,this);
+		if (m_nodeId == 1) {
+			Simulator::Schedule(MilliSeconds(300),&WifiAppAdhoc::RequestPath,this);
+		}
+
+		m_nextSend = Simulator::Schedule (DEFAULT_SEND_P + MilliSeconds(rand() % 30 + 1), &WifiAppAdhoc::GenerateTraffic,this);
+
+        m_nextTimestamp = Simulator::Schedule(DATA_GENERATION_RATE + MilliSeconds(rand() %50 + 1),&WifiAppAdhoc::UpdateLocalTimestamp,this);
 		std::ostringstream ss;
 		ss << "Started @" << Simulator::Now().GetMilliSeconds();
 		NS_LOG_UNCOND(ss.str().c_str());
+	}
+
+	void RequestPath() {
+		Ptr<Packet> packet = Create<Packet>(0);
+		uint64_t packetUid = packet->GetUid();
+		std::pair<uint64_t,int> type (packetUid, RREQ);
+		messageTypeMap.insert(type);
+
+		std::vector<int> pathVector;
+		pathVector.push_back(m_nodeId);
+		std::pair<uint64_t,std::vector<int> > path (packet->GetUid(),pathVector);
+		pathMap.insert(path);
+
+		std::pair<uint64_t,int> destination (packet->GetUid(),4);
+		destinationMap.insert(destination);
+
+		m_sendSocket->Send(packet);
 	}
 
 	void UpdateLocalTimestamp() {
@@ -142,38 +200,180 @@ public:
 
 	void GenerateTraffic ()
 	{
-
 		NS_LOG_UNCOND ("Entered Generate Traffic");
 
-		  Ptr<Packet> packet = Create<Packet>(1000);
-		  uint64_t packetUID = packet->GetUid();
+		Ptr<Packet> packet = Create<Packet>(10);
+		uint64_t packetUID = packet->GetUid();
 
-		  std::pair<uint64_t,std::vector<int64_t> > entry(packetUID,m_lastTimestampSynched);
-		  sentTimestampMap.insert(entry);
-		  std::pair<uint64_t,int> sourceEntry(packetUID,m_nodeId);
-		  sourceMap.insert(sourceEntry);
+		std::pair<uint64_t,int> type (packetUID, DATA);
+		messageTypeMap.insert(type);
+		std::pair<uint64_t,std::vector<int64_t> > entry(packetUID,m_lastTimestampSynched);
+		sentTimestampMap.insert(entry);
+		std::pair<uint64_t,int> sourceEntry(packetUID,m_nodeId);
+	    sourceMap.insert(sourceEntry);
 
-		  if (m_sendSocket) {
+		if (m_sendSocket) {
 	      m_sendSocket->Send(packet);
 	      std::ostringstream ss;
 	      ss << "Node : " << m_nodeId << " packet sent UID: " << packet->GetUid() << " @" << (Simulator::Now().GetMilliSeconds()) << "\n";
 	      AddVectorToStream(ss,m_lastTimestampSynched);
 	      NS_LOG_UNCOND (ss.str().c_str());
-		  }
+		}
+
+    	m_nextSend = Simulator::Schedule (DEFAULT_SEND_P + MilliSeconds(rand() % 50 + 1), &WifiAppAdhoc::GenerateTraffic,this);
 
 
-	      m_nextSend = Simulator::Schedule (DEFAULT_SEND_P, &WifiAppAdhoc::GenerateTraffic,this);
 	      //NS_LOG_UNCOND (Simulator::GetDelayLeft(m_nextSend).GetMilliSeconds());
 	}
 	
+
 
 	void ReceivePacket(Ptr<Socket> socket) {
 		Ptr<Packet> packet = socket->Recv();
 		uint64_t packetUid = packet->GetUid();
 
+	    int messageType = messageTypeMap.find(packetUid)->second;
+		switch(messageType) {
+		case DATA:
+			ReceiveDataPacket(packetUid);
+			break;
+		case RREQ:
+			ReceiveRREQ(packetUid);
+			break;
+		case RACK:
+			RelayRACK(packetUid);
+			break;
+		// OTHER type handlers here
+		}
+	}
+
+	void ReceiveRREQ(uint64_t packetUid) {
+
+		//Add myself to path
+		std::vector<int> path = pathMap.find(packetUid)->second;
+		path.push_back(m_nodeId);
+
+		//Find out if I am destination
+		int destination = destinationMap.find(packetUid)->second;
+		if (m_nodeId == destination) {
+//			std::ostringstream ss;
+//			ss << "Node: " << m_nodeId << "Found path: ";
+//			AddVectorToStream(ss,path);
+//		    NS_LOG_UNCOND(ss.str().c_str());
+//
+//		    debugLog << "Node: " << m_nodeId << "Found path: ";
+//		    AddVectorToStream(debugLog,path); debugLog << "\n";
+//		    debugLog.flush();
+
+		    RelayRACK2(path,path);
+		} else if (NoLoopsInPath(path)) {
+			Simulator::Schedule(MilliSeconds(rand()%PATH_DISCOVERY_BACKOFF+1),&WifiAppAdhoc::RelayRREQ, this, path,destination);
+//			std::ostringstream ss;
+//		    ss << "Node: " << m_nodeId << " ReceivedRReq";
+//			NS_LOG_UNCOND(ss.str().c_str());
+//
+//			debugLog << "Node: " << m_nodeId << " ReceivedRReq \n";
+//			debugLog.flush();
+
+		}
+	}
+
+	void RelayRREQ(std::vector<int> path, int destination) {
+		Ptr<Packet> packet = Create<Packet>(10);
+		std::pair<uint64_t,int> type (packet->GetUid(), RREQ);
+		messageTypeMap.insert(type);
+		std::pair<uint64_t,std::vector<int> > p (packet->GetUid(),path);
+		pathMap.insert(p);
+		std::pair<uint64_t,int> destinationPair (packet->GetUid(),destination);
+		destinationMap.insert(destinationPair);
+		m_sendSocket->Send(packet);
+	}
+
+	void RelayRACK(uint64_t packetUid) {
+
+		std::vector<int> completePath = completePathMap.find(packetUid)->second;
+		std::vector<int> partialPath = partialPathMap.find(packetUid)->second;
+
+		std::ostringstream ss;
+//	    ss << "Node:  " << m_nodeId << " Undirected RACK";
+//	    AddVectorToStream(ss,completePath);
+//	    AddVectorToStream(ss,partialPath);
+//	    NS_LOG_UNCOND(ss.str().c_str());
+
+//	    debugLog << "Node " << m_nodeId << "Undirected RACK";
+//	    AddVectorToStream(debugLog,completePath); debugLog << "\n";
+//	    AddVectorToStream(debugLog,partialPath); debugLog << "\n";
+//        debugLog.flush();
+
+        int ownId = partialPath.back();
+        partialPath.pop_back();
+        if (ownId == m_nodeId && partialPath.size() == 0) {
+        	std::ostringstream ss;
+        	ss << "Node: " << m_nodeId << " Found path: ";
+        	AddVectorToStream(ss,completePath);
+        	NS_LOG_UNCOND(ss.str().c_str());
+
+        	debugLog << "Node: " << m_nodeId << " Found path: ";
+        	AddVectorToStream(debugLog,completePath); debugLog << "\n";
+        	debugLog.flush();
+        } else {
+            Simulator::Schedule(MilliSeconds(rand()%PATH_DISCOVERY_BACKOFF + 1),&WifiAppAdhoc::RelayRACK2,this, completePathMap.find(packetUid)->second, partialPathMap.find(packetUid)->second);
+        }
+		//RelayRACK2(completePathMap.find(packetUid)->second, partialPathMap.find(packetUid)->second);
+	}
+
+	void RelayRACK2(std::vector<int> completePath, std::vector<int> partialPath) {
+		//pull off own id
+
+		int ownId = partialPath.back();
+		partialPath.pop_back();
+        if (ownId == m_nodeId) {
+//        std::ostringstream ss;
+//        ss << "Node: " << m_nodeId << "ReceivedRACK \nComplete: ";
+//        AddVectorToStream(ss,completePath);
+//        ss << "Partial";
+//        AddVectorToStream(ss,partialPath);
+//        NS_LOG_UNCOND(ss.str().c_str());
+//
+//        debugLog << "Node: " << m_nodeId << "ReceivedRACK \nComplete: ";
+//        AddVectorToStream(debugLog,completePath); debugLog << "\n";
+//        debugLog << "Partial";
+//        AddVectorToStream(debugLog,partialPath); debugLog << "\n";
+//        debugLog.flush();
+
+		//Not final destination of RACK
+		NS_ASSERT(partialPath.size() > 0);
+
+		Ptr<Packet> packet = Create<Packet>(0);
+		std::pair<uint64_t,int> type (packet->GetUid(), RACK);
+		messageTypeMap.insert(type);
+
+		std::pair<uint64_t,std::vector<int> > partialPathEntry (packet->GetUid(),partialPath);
+		partialPathMap.insert(partialPathEntry);
+
+		std::pair<uint64_t,std::vector<int> > completePathEntry (packet->GetUid(),completePath);
+		completePathMap.insert(completePathEntry);
+
+		m_sendSocket->Send(packet);
+//        ss.str(""); ss.clear();
+//        ss << "Node: " << m_nodeId << "\n Partial";
+//        AddVectorToStream(ss,partialPath);
+//        ss << "\n Complete";
+//        AddVectorToStream(ss,completePath);
+//        NS_LOG_UNCOND(ss.str().c_str());
+
+
+
+        }
+
+
+
+	}
+
+
+	void ReceiveDataPacket(uint64_t packetUid) {
 		std::vector<int64_t> timestampVectorReceived = sentTimestampMap.find(packetUid)->second;
 		int sourceId = sourceMap.find(packetUid)->second;
-
 
 		std::ostringstream ss;
 		ss << "Node: " << m_nodeId << " OO Received Packet From: " << sourceId << "Vector: ";
@@ -201,6 +401,7 @@ public:
 		ss << "AFTER:  ";
 		AddVectorToStream(ss,m_lastTimestampSynched);
 		NS_LOG_UNCOND(ss.str().c_str());
+
 
 		fileLog << Simulator::Now().GetMilliSeconds() << ", " << packetUid << "\n";
 	}
@@ -255,12 +456,15 @@ static void GenerateTraffic (Ptr<Socket> socket, uint32_t pktSize,
 
 int main (int argc, char *argv[])
 {
+
   fileLog.open("example.txt");
   fileLog << "time, packetId\n";
 
+  debugLog.open("debug.txt");
+
   std::string phyMode ("DsssRate1Mbps");
   double rss = -80;  // -dBm
-  uint32_t packetSize = 1000; // bytes
+  uint32_t packetSize = 10; // bytes
   uint32_t numPackets = 20;
   double interval = 1.0; // seconds
   bool verbose = false;
@@ -313,7 +517,8 @@ int main (int argc, char *argv[])
   wifiPhy.SetChannel (wifiChannel.Create ());
 
   // Add a non-QoS upper mac, and disable rate control
-  NqosWifiMacHelper wifiMac = NqosWifiMacHelper::Default ();
+//  NqosWifiMacHelper wifiMac = NqosWifiMacHelper::Default ();
+  QosWifiMacHelper wifiMac = QosWifiMacHelper::Default ();
   wifi.SetRemoteStationManager ("ns3::ConstantRateWifiManager",
                                 "DataMode",StringValue (phyMode),
                                 "ControlMode",StringValue (phyMode));
@@ -368,7 +573,7 @@ int main (int argc, char *argv[])
   for (int i; i<NR_NODES; ++i) {
 	  Ptr<WifiAppAdhoc> app = CreateObject<WifiAppAdhoc>(c.Get(i),i,NR_NODES);
 	  c.Get(i)->AddApplication(app);
-	  app->SetStartTime(MilliSeconds(10* i));
+	  app->SetStartTime(MilliSeconds(i));
   }
 	  //app->SetStopTime(Time(10000.0));
 //
